@@ -11,6 +11,7 @@
 mod contact;
 mod message;
 mod contact_book;
+mod contact_status;
 
 use rusqlite::{
     hooks::{Action, AuthAction, AuthContext, Authorization, TransactionOperation},
