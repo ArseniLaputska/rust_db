@@ -9,6 +9,7 @@
 // Для удобства всё в одном файле; в реальном проекте обычно разбиваем на несколько модулей.
 
 mod contact;
+mod message;
 
 use rusqlite::{
     hooks::{Action, AuthAction, AuthContext, Authorization, TransactionOperation},
