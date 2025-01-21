@@ -13,6 +13,7 @@ mod message;
 mod contact_book;
 mod contact_status;
 mod contact_seen_at;
+mod monitor;
 
 use rusqlite::{
     hooks::{Action, AuthAction, AuthContext, Authorization, TransactionOperation},
