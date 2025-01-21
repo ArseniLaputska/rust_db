@@ -10,6 +10,7 @@
 
 mod contact;
 mod message;
+mod contact_book;
 
 use rusqlite::{
     hooks::{Action, AuthAction, AuthContext, Authorization, TransactionOperation},
