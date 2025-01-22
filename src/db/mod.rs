@@ -8,12 +8,14 @@
 //
 // Для удобства всё в одном файле; в реальном проекте обычно разбиваем на несколько модулей.
 
-mod contact;
-mod message;
-mod contact_book;
-mod contact_status;
-mod contact_seen_at;
-mod monitor;
+pub mod contact;
+pub mod message;
+pub mod contact_book;
+pub mod contact_status;
+pub mod contact_seen_at;
+pub mod monitor;
+pub mod schema;
+pub mod migrations;
 
 use rusqlite::{
     hooks::{Action, AuthAction, AuthContext, Authorization, TransactionOperation},
