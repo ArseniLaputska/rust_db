@@ -319,6 +319,40 @@ mod tests {
         //  { "db_name":"main", "table":"test_table", "operation":"DELETE", ... }
         Ok(())
     }
+
+    #[test]
+    fn test_monitor_processing() -> Result<()> {
+        let conn = Connection::open_in_memory()?;
+        let mut monitor = DataMonitor::new(conn)?;
+
+        // Создаем локальное изменение
+        let local_changes = vec![
+            HistoryChange {
+                entity_name: "ContactData".to_string(),
+                change_type: ChangeType::Insert,
+                entity_id: Uuid::new_v4(),
+                transaction_id: String::new(),
+            }
+        ];
+        monitor.history.add_transaction("local_author", local_changes)?;
+
+        // Создаем изменение для отправки
+        let sender_changes = vec![
+            HistoryChange {
+                entity_name: "MessageData".to_string(),
+                change_type: ChangeType::Update,
+                entity_id: Uuid::new_v4(),
+                transaction_id: String::new(),
+            }
+        ];
+        monitor.history.add_transaction("sender", sender_changes)?;
+
+        // Проверяем обработку изменений
+        monitor.process_local_changes()?;
+        monitor.process_sender_changes()?;
+
+        Ok(())
+    }
 }
 
 /* -----------------------------------------------------------------------------------------------
@@ -348,3 +382,84 @@ mod tests {
 
 Но в текущем виде это уже «серьёзное» решение для Data Monitor.
 ----------------------------------------------------------------------------------------------- */
+
+pub struct DataMonitor {
+    history: PersistentHistory,
+    local_last_timestamp: i64,
+    sender_last_timestamp: i64,
+}
+
+impl DataMonitor {
+    pub fn new(conn: Connection) -> Result<Self> {
+        let history = PersistentHistory::new(conn.clone());
+        history.init()?;
+        
+        Ok(Self {
+            history,
+            local_last_timestamp: 0,
+            sender_last_timestamp: 0,
+        })
+    }
+
+    pub fn process_local_changes(&mut self) -> Result<()> {
+        let transactions = self.history.get_transactions_after(self.local_last_timestamp)?;
+        
+        for transaction in transactions {
+            if transaction.author != "sender" {
+                for change in transaction.changes {
+                    self.handle_local_change(&change)?;
+                }
+                self.local_last_timestamp = transaction.timestamp;
+            }
+        }
+        
+        Ok(())
+    }
+
+    pub fn process_sender_changes(&mut self) -> Result<()> {
+        let transactions = self.history.get_transactions_after(self.sender_last_timestamp)?;
+        
+        for transaction in transactions {
+            if transaction.author == "sender" {
+                for change in transaction.changes {
+                    self.handle_sender_change(&change)?;
+                }
+                self.sender_last_timestamp = transaction.timestamp;
+            }
+        }
+        
+        Ok(())
+    }
+
+    fn handle_local_change(&self, change: &HistoryChange) -> Result<()> {
+        match change.entity_name.as_str() {
+            "ContactData" => {
+                // Обработка изменений контакта
+                println!("Local contact change: {:?}", change);
+            },
+            "MessageData" => {
+                // Обработка изменений сообщения
+                println!("Local message change: {:?}", change);
+            },
+            // ... другие сущности
+            _ => println!("Unknown entity: {}", change.entity_name),
+        }
+        Ok(())
+    }
+
+    fn handle_sender_change(&self, change: &HistoryChange) -> Result<()> {
+        match change.entity_name.as_str() {
+            "ContactData" => {
+                // Обработка изменений для отправки
+                println!("Sender contact change: {:?}", change);
+            },
+            "MessageData" => {
+                // Обработка изменений для отправки
+                println!("Sender message change: {:?}", change);
+            },
+            // ... другие сущности
+            _ => println!("Unknown entity: {}", change.entity_name),
+        }
+        Ok(())
+    }
+}
