@@ -1,7 +1,6 @@
 // src/lib.rs
 
 #![allow(unused_imports, unused_mut, unused_variables)]
-
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::sync::{Arc, Mutex};
@@ -16,7 +15,8 @@ use db::monitor::*;
 use crate::db::migrations::setup_migrations;
 
 use crate::db::contact::*;
-use crate::db::contact_book::ContactBookRepo;
+use crate::db::contacts_store::*;
+// use crate::db::contact_book::ContactBookRepo;
 use crate::db::contact_seen_at::ContactSeenAtRepo;
 use crate::db::contact_status::ContactStatusRepo;
 use crate::db::message::MessageRepo;
@@ -304,42 +304,42 @@ fn result_to_c_string<E: std::fmt::Display>(result: Result<String, E>) -> *mut c
 }
 
 // ContactBookRepo wrappers
-#[no_mangle]
-pub unsafe extern "C" fn contact_book_add_json(conn_ptr: *mut Connection, json: *const c_char) -> *mut c_char {
-    let conn = &*conn_ptr;
-    let repo = ContactBookRepo::new(conn);
-    let json_str = c_str_to_string(json);
-    result_to_c_string(repo.add_contact_book_json(&json_str))
-}
+// #[no_mangle]
+// pub unsafe extern "C" fn contact_book_add_json(conn_ptr: *mut Connection, json: *const c_char) -> *mut c_char {
+//     let conn = &*conn_ptr;
+//     let repo = ContactBookRepo::new(conn);
+//     let json_str = c_str_to_string(json);
+//     result_to_c_string(repo.add_contact_book_json(&json_str))
+// }
 
-#[no_mangle]
-pub unsafe extern "C" fn contact_book_get_json(conn_ptr: *mut Connection, id: *const c_char) -> *mut c_char {
-    let conn = &*conn_ptr;
-    let repo = ContactBookRepo::new(conn);
-    let id_str = c_str_to_string(id);
-    result_to_c_string(repo.get_contact_book_json(&id_str))
-}
+// #[no_mangle]
+// pub unsafe extern "C" fn contact_book_get_json(conn_ptr: *mut Connection, id: *const c_char) -> *mut c_char {
+//     let conn = &*conn_ptr;
+//     let repo = ContactBookRepo::new(conn);
+//     let id_str = c_str_to_string(id);
+//     result_to_c_string(repo.get_contact_book_json(&id_str))
+// }
 
-#[no_mangle]
-pub unsafe extern "C" fn contact_book_update_json(
-    conn_ptr: *mut Connection,
-    id: *const c_char,
-    json: *const c_char
-) -> *mut c_char {
-    let conn = &*conn_ptr;
-    let repo = ContactBookRepo::new(conn);
-    let id_str = c_str_to_string(id);
-    let json_str = c_str_to_string(json);
-    result_to_c_string(repo.update_contact_book_json(&id_str, &json_str))
-}
+// #[no_mangle]
+// pub unsafe extern "C" fn contact_book_update_json(
+//     conn_ptr: *mut Connection,
+//     id: *const c_char,
+//     json: *const c_char
+// ) -> *mut c_char {
+//     let conn = &*conn_ptr;
+//     let repo = ContactBookRepo::new(conn);
+//     let id_str = c_str_to_string(id);
+//     let json_str = c_str_to_string(json);
+//     result_to_c_string(repo.update_contact_book_json(&id_str, &json_str))
+// }
 
-#[no_mangle]
-pub unsafe extern "C" fn contact_book_delete_json(conn_ptr: *mut Connection, id: *const c_char) -> *mut c_char {
-    let conn = &*conn_ptr;
-    let repo = ContactBookRepo::new(conn);
-    let id_str = c_str_to_string(id);
-    result_to_c_string(repo.delete_contact_book_json(&id_str))
-}
+// #[no_mangle]
+// pub unsafe extern "C" fn contact_book_delete_json(conn_ptr: *mut Connection, id: *const c_char) -> *mut c_char {
+//     let conn = &*conn_ptr;
+//     let repo = ContactBookRepo::new(conn);
+//     let id_str = c_str_to_string(id);
+//     result_to_c_string(repo.delete_contact_book_json(&id_str))
+// }
 
 // ContactSeenAtRepo wrappers
 #[no_mangle]

@@ -20,10 +20,10 @@ pub mod history;
 pub mod transport;
 pub mod handler;
 pub mod objc_converters;
-mod objc_contact;
-mod cache;
-mod monitoring;
-mod contact_store;
+pub mod objc_contact;
+pub mod cache;
+pub mod monitoring;
+pub mod contact_store;
 
 use rusqlite::{
     hooks::{Action, AuthAction, AuthContext, Authorization, TransactionOperation},
