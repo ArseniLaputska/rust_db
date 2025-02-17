@@ -1,19 +1,21 @@
 // src/lib.rs
 
-#![allow(unused_imports)]
+#![allow(unused_imports, unused_mut, unused_variables)]
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::sync::{Arc, Mutex};
 use once_cell::sync::Lazy;
-use rusqlite::{Connection, OpenFlags, Result as SqlResult};
-use log::{info, error};
+use tokio_rusqlite::{Connection, OpenFlags, Result as SqlResult, Error as TRusqliteError};
+use log::{info, error, warn};
+use uuid::Uuid;
 
 mod db;
-use db::monitor::{register_preupdate_hook, start_event_dispatcher, register_swift_callback};
+use db::objc_converters::*;
+use db::monitor::*;
 use crate::db::migrations::setup_migrations;
 
-use crate::db::contact::ContactRepo;
+use crate::db::contact::*;
 use crate::db::contact_book::ContactBookRepo;
 use crate::db::contact_seen_at::ContactSeenAtRepo;
 use crate::db::contact_status::ContactStatusRepo;
@@ -21,13 +23,194 @@ use crate::db::message::MessageRepo;
 
 // ---------------------- Глобальные объекты ----------------------
 
-/// Глобальный держатель (Option<Connection>) под Mutex, чтобы другие функции могли его использовать
-static GLOBAL_CONN: Lazy<Mutex<Option<Connection>>> = Lazy::new(|| Mutex::new(None));
+/// Глобальное хранилище асинхронного соединения
+/// (Мы храним Option<Arc<Connection>>, чтобы быть гибкими)
+static GLOBAL_CONN: Lazy<Mutex<Option<Arc<tokio_rusqlite::Connection>>>> = Lazy::new(|| Mutex::new(None));
+
+/// Swift callback (указатель на функцию) — global
+static mut SWIFT_CALLBACK: Option<extern "C" fn(*const c_char)> = None;
+
+/// Для хранения событий, пойманных из preupdate_hook, делаем mpsc
+use std::sync::mpsc::{self, Sender, Receiver};
+
+// Глобальная очередь PreUpdateEvent
+//  - (Sender<PreUpdateEvent>, Mutex<Receiver<PreUpdateEvent>>)
+// static EVENT_CHANNEL: Lazy<(Sender<PreUpdateEvent>, Mutex<Receiver<PreUpdateEvent>>)> = Lazy::new(|| {
+//     let (tx, rx) = mpsc::channel::<PreUpdateEvent>();
+//     (tx, Mutex::new(rx))
+// });
+//
+// use std::sync::mpsc::{self, Sender, Receiver};
 
 /// Версия схемы (example)
 const LATEST_SCHEMA_VERSION: i32 = 1;
 
 // ---------------------- Экспортируемые функции ----------------------
+
+
+#[no_mangle]
+pub extern "C" fn swift_main(
+    db_path: *const c_char,
+    db_key: *const c_char,
+    callback: extern "C" fn(*const c_char)
+) -> i32 {
+    // Инициализируем базу
+    let init_code = init_database(db_path, db_key);
+    if init_code != 0 {
+        return init_code;
+    }
+
+    // Регистрируем callback
+    set_swift_callback(callback);
+
+    // Запускаем фоновые процессы
+    start_background_services();
+
+    0
+}
+
+/// Фоновая служба для обработки событий
+fn start_background_services() {
+    std::thread::spawn(|| {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            if let Some(conn) = &*GLOBAL_CONN.lock().unwrap() {
+                // let monitor = DataMonitor::new(conn.clone());
+                // monitor.start().await;
+            }
+        });
+    });
+}
+
+#[no_mangle]
+pub extern "C" fn get_contacts_page(offset: i32, limit: i32) -> *mut c_char {
+    // Захватываем глобальное соединение
+    let conn_guard = GLOBAL_CONN.lock().unwrap();
+    if let Some(conn) = &*conn_guard {
+        let repo = ContactRepo::new(Arc::clone(conn));
+
+        // Так как репозиторий работает асинхронно, создаём временный runtime:
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let fut = async {
+            match repo.get_paginated(offset as i64, limit as i64).await {
+                Ok(contacts) => {
+                    // Преобразуем в JSON. Здесь желательно, чтобы тип ContactObjC был сериализуемым;
+                    // если нет – можно сконвертировать их в внутреннюю структуру Contact перед сериализацией.
+                    serde_json::to_string(&contacts).unwrap_or_else(|_| "[]".to_string())
+                },
+                Err(e) => {
+                    error!("Failed to get contacts: {}", e);
+                    "[]".to_string()
+                }
+            }
+        };
+        let json = rt.block_on(fut);
+        CString::new(json).unwrap().into_raw()
+    } else {
+        CString::new("[]").unwrap().into_raw()
+    }
+}
+
+/// Генерация тестовых данных
+#[no_mangle]
+pub extern "C" fn generate_test_data() -> i32 {
+    let conn_guard = GLOBAL_CONN.lock().unwrap();
+    if let Some(conn) = &*conn_guard {
+        // Добавляем 100 контактов
+        add_test_contacts();
+
+        // Добавляем тестовые сообщения
+        // add_test_messages();
+
+        0
+    } else {
+        error!("Database not initialized");
+        1
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn add_test_contacts() -> i32 {
+    let conn_guard = GLOBAL_CONN.lock();
+    if let Some(conn) = &*conn_guard {
+        let repo = ContactRepo::new(Arc::clone(conn));
+        for i in 0..100 {
+            let contact = Contact {
+                first_name: format!("User {}", i),
+                last_name: format!("Lastname {}", i),
+                ..Contact::default()
+            };
+
+            let objc_contact = contact.to_objc();
+
+            if let Err(e) = repo.add(objc_contact) {
+                unsafe { free_contact_objc(objc_contact) };
+                return 1;
+            }
+
+            unsafe { free_contact_objc(objc_contact) };
+        }
+        0
+    } else {
+        error!("Database not initialized");
+        1
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn create_contact_objc() -> *mut ContactObjC {
+    Contact::default().to_objc()
+}
+
+#[no_mangle]
+pub extern "C" fn add_single_contact(name: *const c_char, phone: *const c_char) -> i32 {
+    let conn_guard = GLOBAL_CONN.lock();
+    if let Some(conn) = &*conn_guard {
+        let repo = ContactRepo::new(Arc::clone(conn));
+
+        let contact = Contact {
+            first_name: format!("User New"),
+            last_name: format!("Lastname New"),
+            ..Contact::default()
+        };
+
+        let contactObjC = contact.to_objc();
+
+        match repo.add(&contactObjC) {
+            Ok(_) => 0,
+            Err(e) => {
+                error!("Failed to add contact: {}", e);
+                1
+            }
+        }
+    } else {
+        error!("Database not initialized");
+        1
+    }
+}
+
+// #[no_mangle]
+// pub extern "C" fn get_contacts_page(
+//     offset: i32,
+//     limit: i32,
+// ) -> *mut c_char {
+//     let conn_guard = GLOBAL_CONN.lock();
+//     if let Some(conn) = &*conn_guard {
+//         let repo = ContactRepo::new(Arc::clone(conn));
+//         match repo.get_paginated(offset, limit) {
+//             Ok(contacts) => {
+//                 let json = serde_json::to_string(&contacts).unwrap();
+//                 CString::new(json).unwrap().into_raw()
+//             },
+//             Err(e) => {
+//                 error!("Failed to get contacts: {}", e);
+//                 CString::new("[]").unwrap().into_raw()
+//             }
+//         }
+//     } else {
+//         CString::new("[]").unwrap().into_raw()
+//     }
+// }
 
 /// Инициализация базы данных (зашифрованной SQLCipher).
 ///
@@ -64,7 +247,7 @@ pub extern "C" fn init_database(db_path: *const c_char, db_key: *const c_char) -
             }
 
             // 6. Запускаем диспетчер (если ещё не стартовал)
-            start_event_dispatcher();
+            // start_event_dispatcher();
 
             info!("init_database success");
             0

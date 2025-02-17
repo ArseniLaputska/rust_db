@@ -14,7 +14,7 @@ pub struct ContactStatusData {
 pub fn create_contact_status_table(conn: &Connection) -> Result<()> {
     conn.execute(
         r#"
-        CREATE TABLE IF NOT EXISTS contact_status_data (
+        CREATE TABLE IF NOT EXISTS contact_status (
             id BLOB PRIMARY KEY,
             status INTEGER
         )
@@ -116,9 +116,9 @@ impl<'a> ContactStatusRepo<'a> {
     // all_contacts_status -> возвращает массив JSON
     // аналог Swift: allContactsStatus() -> [ContactStatusStruct]
     pub fn all_contacts_status_json(&self) -> Result<String, ContactStatusError> {
-        // SELECT * FROM contact_status_data
+        // SELECT * FROM contact_status
         let mut stmt = self.conn.prepare(
-            "SELECT id, status FROM contact_status_data"
+            "SELECT id, status FROM contact_status"
         ).map_err(|e| ContactStatusError::Sql(e.to_string()))?;
 
         let mut rows = stmt.query([])
@@ -149,7 +149,7 @@ impl<'a> ContactStatusRepo<'a> {
 
     // Вспомогательные SELECT/INSERT/UPDATE (внутренние)
     fn select_inner_tx(&self, tx: &Transaction, id: Uuid) -> Result<Option<ContactStatusData>, ContactStatusError> {
-        let mut stmt = tx.prepare("SELECT status FROM contact_status_data WHERE id=?1")
+        let mut stmt = tx.prepare("SELECT status FROM contact_status WHERE id=?1")
             .map_err(|e| ContactStatusError::Sql(e.to_string()))?;
         let mut rows = stmt.query(params![&id.as_bytes()])
             .map_err(|e| ContactStatusError::Sql(e.to_string()))?;
@@ -172,7 +172,7 @@ impl<'a> ContactStatusRepo<'a> {
 
     fn insert_inner_tx(&self, tx: &Transaction, data: &ContactStatusData) -> Result<(), ContactStatusError> {
         tx.execute(
-            "INSERT INTO contact_status_data (id, status) VALUES (?1, ?2)",
+            "INSERT INTO contact_status (id, status) VALUES (?1, ?2)",
             params![&data.id.as_bytes(), data.status],
         ).map_err(|e| ContactStatusError::Sql(e.to_string()))?;
         Ok(())
@@ -180,7 +180,7 @@ impl<'a> ContactStatusRepo<'a> {
 
     fn update_inner_tx(&self, tx: &Transaction, data: &ContactStatusData) -> Result<(), ContactStatusError> {
         tx.execute(
-            "UPDATE contact_status_data SET status=?1 WHERE id=?2",
+            "UPDATE contact_status SET status=?1 WHERE id=?2",
             params![data.status, &data.id.as_bytes()],
         ).map_err(|e| ContactStatusError::Sql(e.to_string()))?;
         Ok(())

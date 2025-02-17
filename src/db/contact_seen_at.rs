@@ -13,7 +13,7 @@ pub struct ContactSeenAtData {
 pub fn create_contact_seen_at_table(conn: &Connection) -> Result<()> {
     conn.execute(
         r#"
-        CREATE TABLE IF NOT EXISTS contact_seen_at_data (
+        CREATE TABLE IF NOT EXISTS contact_seen_at (
             id BLOB PRIMARY KEY,
             date TEXT
         )
@@ -141,7 +141,7 @@ impl<'a> ContactSeenAtRepo<'a> {
     // allSeenAt() -> [ContactSeenAtStruct]
     // аналог: func allSeenAt() throws -> [ContactSeenAtStruct]
     pub fn all_seen_json(&self) -> Result<String, ContactSeenAtError> {
-        let mut stmt = self.conn.prepare("SELECT id, date FROM contact_seen_at_data")
+        let mut stmt = self.conn.prepare("SELECT id, date FROM contact_seen_at")
             .map_err(|e| ContactSeenAtError::Sql(e.to_string()))?;
 
         let mut rows = stmt.query([])
@@ -176,7 +176,7 @@ impl<'a> ContactSeenAtRepo<'a> {
 
     // private SELECT/INSERT/UPDATE
     fn select_inner_tx(&self, tx: &Transaction, id: Uuid) -> Result<Option<ContactSeenAtData>, ContactSeenAtError> {
-        let mut stmt = tx.prepare("SELECT date FROM contact_seen_at_data WHERE id=?1")
+        let mut stmt = tx.prepare("SELECT date FROM contact_seen_at WHERE id=?1")
             .map_err(|e| ContactSeenAtError::Sql(e.to_string()))?;
         let mut rows = stmt.query(params![&id.as_bytes()])
             .map_err(|e| ContactSeenAtError::Sql(e.to_string()))?;
@@ -199,7 +199,7 @@ impl<'a> ContactSeenAtRepo<'a> {
 
     fn insert_inner_tx(&self, tx: &Transaction, data: &ContactSeenAtData) -> Result<(), ContactSeenAtError> {
         tx.execute(
-            "INSERT INTO contact_seen_at_data (id, date) VALUES (?1, ?2)",
+            "INSERT INTO contact_seen_at (id, date) VALUES (?1, ?2)",
             params![&data.id.as_bytes(), &data.date_json],
         ).map_err(|e| ContactSeenAtError::Sql(e.to_string()))?;
         Ok(())
@@ -207,7 +207,7 @@ impl<'a> ContactSeenAtRepo<'a> {
 
     fn update_inner_tx(&self, tx: &Transaction, data: &ContactSeenAtData) -> Result<(), ContactSeenAtError> {
         tx.execute(
-            "UPDATE contact_seen_at_data SET date=?1 WHERE id=?2",
+            "UPDATE contact_seen_at SET date=?1 WHERE id=?2",
             params![&data.date_json, &data.id.as_bytes()],
         ).map_err(|e| ContactSeenAtError::Sql(e.to_string()))?;
         Ok(())

@@ -16,6 +16,14 @@ pub mod contact_seen_at;
 pub mod monitor;
 pub mod schema;
 pub mod migrations;
+pub mod history;
+pub mod transport;
+pub mod handler;
+pub mod objc_converters;
+mod objc_contact;
+mod cache;
+mod monitoring;
+mod contact_store;
 
 use rusqlite::{
     hooks::{Action, AuthAction, AuthContext, Authorization, TransactionOperation},
