@@ -1,4 +1,4 @@
-use rusqlite::{Connection, Result};
+use tokio_rusqlite::{Connection, Result};
 use crate::db::schema::SCHEMA_V1;
 
 pub fn setup_migrations(conn: &Connection) -> Result<()> {

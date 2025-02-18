@@ -1,4 +1,4 @@
-use rusqlite::{Connection, Result, params, Transaction};
+use tokio_rusqlite::{Connection, Result, params, Transaction};
 use uuid::Uuid;
 use serde::{Deserialize, Serialize};
 use std::error::Error;

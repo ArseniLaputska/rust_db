@@ -1,9 +1,10 @@
-use rusqlite::{Connection, params, Result as SqlResult};
+use tokio_rusqlite::{Connection, params, Result as SqlResult};
 use uuid::{Uuid, Bytes};
 use std::sync::Arc;
 use std::ffi::{c_char, CStr};
 use objc2_foundation::{NSData, NSString, NSUInteger};
 use objc2::rc::{Retained, autoreleasepool};
+use serde::Serialize;
 use super::handler::EntityRepository;
 use super::objc_converters::{
     convert_to_nsdata, optional_nsstring,
@@ -28,18 +29,18 @@ pub struct ContactObjC {
 }
 
 pub struct ContactRepo {
-    conn: Arc<rusqlite::Connection>,
+    conn: Arc<Connection>,
     cache: CacheHandler,
 }
 
 impl ContactRepo {
-    pub fn new(conn: Arc<rusqlite::Connection>, cache: CacheHandler) -> Self {
+    pub fn new(conn: Arc<Connection>, cache: CacheHandler) -> Self {
         Self { conn, cache }
     }
 
     /// Возвращает страницу контактов, отсортированную по времени создания.
     pub async fn get_paginated(&self, offset: i64, limit: i64) -> SqlResult<Vec<ContactObjC>> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.call(
             r#"SELECT
                 id, first_name, last_name, relationship,
                 username, language, picture_url,
@@ -68,7 +69,7 @@ impl ContactRepo {
         }
 
         // Если в кэше нет, выполняем запрос в базу
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.call(
             r#"SELECT
                 id, first_name, last_name, relationship,
                 username, language, picture_url,
@@ -93,7 +94,7 @@ impl ContactRepo {
 
     pub async fn add(&self, contact: &ContactObjC) -> SqlResult<()> {
         let contact = Self::objc_to_rust(contact)?;
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.call(
             r#"INSERT INTO contact (
                 id, first_name, last_name, relationship,
                 username, language, picture_url,
@@ -121,7 +122,7 @@ impl ContactRepo {
     // Специфические методы
     pub async fn search_by_name(&self, query: &str) -> SqlResult<Vec<ContactObjC>> {
         let query = format!("%{}%", sanitize_like(query));
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.call(
             "SELECT * FROM contact WHERE first_name LIKE ?1 OR last_name LIKE ?1"
         ).await?;
 
@@ -177,7 +178,7 @@ impl ContactRepo {
         })
     }
 
-    fn objc_to_rust(contact: &ContactObjC) -> SqlResult<Contact> {
+    pub fn objc_to_rust(contact: &ContactObjC) -> SqlResult<Contact> {
         autoreleasepool(|_| {
             Ok(Contact {
                 id: nsdata_to_uuid(contact.id)?,
@@ -201,7 +202,7 @@ fn sanitize_like(input: &str) -> String {
 }
 
 // Rust-представление для внутренних операций
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct Contact {
     pub id: Uuid,
     pub first_name: String,

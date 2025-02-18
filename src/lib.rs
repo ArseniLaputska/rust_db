@@ -15,7 +15,8 @@ use db::monitor::*;
 use crate::db::migrations::setup_migrations;
 
 use crate::db::contact::*;
-use crate::db::contacts_store::*;
+use crate::db::contact_store::*;
+use crate::db::cache::CacheHandler;
 // use crate::db::contact_book::ContactBookRepo;
 use crate::db::contact_seen_at::ContactSeenAtRepo;
 use crate::db::contact_status::ContactStatusRepo;
@@ -25,7 +26,12 @@ use crate::db::message::MessageRepo;
 
 /// Глобальное хранилище асинхронного соединения
 /// (Мы храним Option<Arc<Connection>>, чтобы быть гибкими)
-static GLOBAL_CONN: Lazy<Mutex<Option<Arc<tokio_rusqlite::Connection>>>> = Lazy::new(|| Mutex::new(None));
+static GLOBAL_CONN: Lazy<Mutex<Option<Arc<Connection>>>> =
+    Lazy::new(|| Mutex::new(None));
+
+/// Глобальный кэш для контактов. Здесь создаём CacheHandler с ёмкостью 100.
+static GLOBAL_CONTACT_CACHE: Lazy<CacheHandler> =
+    Lazy::new(|| CacheHandler::new(100));
 
 /// Swift callback (указатель на функцию) — global
 static mut SWIFT_CALLBACK: Option<extern "C" fn(*const c_char)> = None;
@@ -54,16 +60,19 @@ pub extern "C" fn swift_main(
     db_key: *const c_char,
     callback: extern "C" fn(*const c_char)
 ) -> i32 {
+    // Инициализируем логгер (например, через env_logger)
+    env_logger::init();
+
     // Инициализируем базу
     let init_code = init_database(db_path, db_key);
     if init_code != 0 {
         return init_code;
     }
 
-    // Регистрируем callback
+    // Регистрируем Swift callback
     set_swift_callback(callback);
 
-    // Запускаем фоновые процессы
+    // Запускаем фоновые службы (например, для мониторинга)
     start_background_services();
 
     0
@@ -84,19 +93,25 @@ fn start_background_services() {
 
 #[no_mangle]
 pub extern "C" fn get_contacts_page(offset: i32, limit: i32) -> *mut c_char {
-    // Захватываем глобальное соединение
     let conn_guard = GLOBAL_CONN.lock().unwrap();
     if let Some(conn) = &*conn_guard {
-        let repo = ContactRepo::new(Arc::clone(conn));
-
-        // Так как репозиторий работает асинхронно, создаём временный runtime:
+        // Создаем репозиторий, передавая глобальное соединение и кэш.
+        let repo = ContactRepo::new(Arc::clone(conn), GLOBAL_CONTACT_CACHE.clone());
+        // Создаем временный runtime для блокирующего вызова async метода
         let rt = tokio::runtime::Runtime::new().unwrap();
         let fut = async {
             match repo.get_paginated(offset as i64, limit as i64).await {
-                Ok(contacts) => {
-                    // Преобразуем в JSON. Здесь желательно, чтобы тип ContactObjC был сериализуемым;
-                    // если нет – можно сконвертировать их в внутреннюю структуру Contact перед сериализацией.
-                    serde_json::to_string(&contacts).unwrap_or_else(|_| "[]".to_string())
+                Ok(contact_objc_vec) => {
+                    // Преобразуем Vec<ContactObjC> в Vec<Contact> через функцию objc_to_rust.
+                    // Если преобразование не удалось для какого-либо элемента, пропускаем его.
+                    let mut contacts_rust = Vec::new();
+                    for objc in contact_objc_vec.iter() {
+                        if let Ok(contact) = ContactRepo::objc_to_rust(objc) {
+                            contacts_rust.push(contact);
+                        }
+                    }
+                    // Сериализуем в JSON
+                    serde_json::to_string(&contacts_rust).unwrap_or_else(|_| "[]".to_string())
                 },
                 Err(e) => {
                     error!("Failed to get contacts: {}", e);
@@ -116,12 +131,8 @@ pub extern "C" fn get_contacts_page(offset: i32, limit: i32) -> *mut c_char {
 pub extern "C" fn generate_test_data() -> i32 {
     let conn_guard = GLOBAL_CONN.lock().unwrap();
     if let Some(conn) = &*conn_guard {
-        // Добавляем 100 контактов
         add_test_contacts();
-
-        // Добавляем тестовые сообщения
-        // add_test_messages();
-
+        // При необходимости можно добавить тестовые сообщения.
         0
     } else {
         error!("Database not initialized");
@@ -131,23 +142,20 @@ pub extern "C" fn generate_test_data() -> i32 {
 
 #[no_mangle]
 pub extern "C" fn add_test_contacts() -> i32 {
-    let conn_guard = GLOBAL_CONN.lock();
+    let conn_guard = GLOBAL_CONN.lock().unwrap();
     if let Some(conn) = &*conn_guard {
-        let repo = ContactRepo::new(Arc::clone(conn));
+        let repo = ContactRepo::new(Arc::clone(conn), GLOBAL_CONTACT_CACHE.clone());
         for i in 0..100 {
             let contact = Contact {
                 first_name: format!("User {}", i),
                 last_name: format!("Lastname {}", i),
                 ..Contact::default()
             };
-
             let objc_contact = contact.to_objc();
-
-            if let Err(e) = repo.add(objc_contact) {
+            if let Err(e) = repo.add(unsafe { &*objc_contact }) {
                 unsafe { free_contact_objc(objc_contact) };
                 return 1;
             }
-
             unsafe { free_contact_objc(objc_contact) };
         }
         0
@@ -164,25 +172,23 @@ pub extern "C" fn create_contact_objc() -> *mut ContactObjC {
 
 #[no_mangle]
 pub extern "C" fn add_single_contact(name: *const c_char, phone: *const c_char) -> i32 {
-    let conn_guard = GLOBAL_CONN.lock();
+    let conn_guard = GLOBAL_CONN.lock().unwrap();
     if let Some(conn) = &*conn_guard {
-        let repo = ContactRepo::new(Arc::clone(conn));
-
+        let repo = ContactRepo::new(Arc::clone(conn), GLOBAL_CONTACT_CACHE.clone());
         let contact = Contact {
             first_name: format!("User New"),
             last_name: format!("Lastname New"),
             ..Contact::default()
         };
-
-        let contactObjC = contact.to_objc();
-
-        match repo.add(&contactObjC) {
+        let contact_objc = contact.to_objc();
+        let result = match repo.add(&contact_objc) {
             Ok(_) => 0,
             Err(e) => {
                 error!("Failed to add contact: {}", e);
                 1
             }
-        }
+        };
+        result
     } else {
         error!("Database not initialized");
         1
@@ -221,7 +227,6 @@ pub extern "C" fn add_single_contact(name: *const c_char, phone: *const c_char) 
 /// Возвращает `0`, если всё ок, иначе != 0 для ошибок.
 #[no_mangle]
 pub extern "C" fn init_database(db_path: *const c_char, db_key: *const c_char) -> i32 {
-    // 1. Считываем C-строки
     if db_path.is_null() || db_key.is_null() {
         error!("init_database: db_path or db_key is null");
         return 1;
@@ -229,26 +234,17 @@ pub extern "C" fn init_database(db_path: *const c_char, db_key: *const c_char) -
     let db_path_str = unsafe { CStr::from_ptr(db_path) }.to_string_lossy().to_string();
     let db_key_str = unsafe { CStr::from_ptr(db_key) }.to_string_lossy().to_string();
 
-    // 2. Открываем зашифрованную БД
     match open_encrypted_db(&db_path_str, &db_key_str) {
         Ok(conn) => {
-            // 3. Миграции
             if let Err(e) = setup_migrations(&conn) {
                 error!("setup_migrations error: {}", e);
                 return 2;
             }
-            // 4. Регистрируем preupdate_hook
             register_preupdate_hook(&conn);
-
-            // 5. Сохраняем
             {
                 let mut guard = GLOBAL_CONN.lock().unwrap();
-                *guard = Some(conn);
+                *guard = Some(Arc::new(conn));
             }
-
-            // 6. Запускаем диспетчер (если ещё не стартовал)
-            // start_event_dispatcher();
-
             info!("init_database success");
             0
         },
@@ -275,18 +271,12 @@ pub extern "C" fn check_db_ready() -> i32 {
 // ---------------------- Внутренние функции ----------------------
 
 fn open_encrypted_db(path: &str, key: &str) -> SqlResult<Connection> {
-    // SQLite + SQLCipher
     let conn = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE
     )?;
-
-    // Устанавливаем ключ
     let sql = format!("PRAGMA key = '{}';", key);
     conn.execute(&sql, [])?;
-
-    // Можно проверить: conn.query_row("PRAGMA cipher_version;", [], |r| r.get::<_, String>(0))?;
-
     Ok(conn)
 }
 
