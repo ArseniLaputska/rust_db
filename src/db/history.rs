@@ -47,7 +47,9 @@ impl PersistentHistory {
         Self { conn }
     }
     pub async fn add_record(&self, record: HistoryRecord) -> SqlResult<i64> {
-        let tx = self.conn.await.transaction().await?;
+        let tx = self.conn.call(|conn| {
+           conn.transaction().map_err(|e| e.into())
+        }).await?;
 
         let entity_id_bytes = record.entity_id.as_bytes().to_vec();
         let change_type_int = record.change_type.clone() as i64;
@@ -83,8 +85,9 @@ impl PersistentHistory {
     }
 
     pub async fn get_records_after(&self, after_ts: f64) -> SqlResult<Vec<HistoryRecord>> {
-        let mut stmt = self.conn.await.prepare(
-            r#"SELECT
+        let mut stmt = self.conn.call(|conn| {
+            conn.prepare(
+                r#"SELECT
                 id,
                 entity_name,
                 entity_id,
@@ -96,7 +99,8 @@ impl PersistentHistory {
              FROM history
              WHERE created_at > ?1
              ORDER BY created_at ASC"#
-        ).await?;
+            ).map_err(|e| e.into())
+        }).await?;
 
         let rows = stmt.query_map([after_ts], |row| {
             let id: i64 = row.get(0)?;
@@ -133,10 +137,12 @@ impl PersistentHistory {
     }
 
     pub async fn update_sync_status(&self, record_id: i64, status: i64) -> SqlResult<()> {
-        self.conn.await.execute(
-            "UPDATE history SET sync_status = ?1, try_count = try_count + 1 WHERE id = ?2",
-            rusqlite::params![status, record_id],
-        ).await?;
+        self.conn.call(|conn| {
+            conn.execute(
+                "UPDATE history SET sync_status = ?1, try_count = try_count + 1 WHERE id = ?2",
+                rusqlite::params![status, record_id],
+            ).map_err(|e| e.into())
+        }).await?;
         Ok(())
     }
 }

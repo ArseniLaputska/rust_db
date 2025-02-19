@@ -3,6 +3,30 @@ name = "rust_sqlite"
 version = "0.1.0"
 edition = "2021"
 
+[profile.release]
+# debug = true
+# opt-level = 1
+# Уровень оптимизации (0-3, "s" или "z"):
+# - "z" = минимальный размер, - "s" = чуть более агрессивная оптимизация на размер
+# - "3" = максимальная оптимизация на скорость
+opt-level = 3
+
+# Link Time Optimization
+lto = true
+
+# Количество единиц компиляции
+# 1 = чаще всего лучшее сжатие кода, но медленнее компиляция
+codegen-units = 1
+
+# Отключить отладочную информацию:
+debug = false
+
+# «Прихлопнуть» программу на панике (уменьшает размер бинарника, но будьте осторожны)
+panic = "abort"
+
+# Убираем из бинарника отладочные символы (потребуется "strip")
+strip = "symbols"
+
 [dependencies]
 rusqlite = { version = "0.32.0", features = ["bundled-sqlcipher", "uuid", "chrono", "serde_json", "preupdate_hook"] }
 uuid = { version = "1.12.1", features = ["v4", "v7", "serde"] }
@@ -24,6 +48,7 @@ objc2-foundation = "0.3.0"
 lru = "0.13.0"
 prometheus = "0.13.4"
 env_logger = "0.11.6"
+cbindgen = "0.28.0"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["staticlib", "rlib"]

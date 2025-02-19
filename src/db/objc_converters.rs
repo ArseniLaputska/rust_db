@@ -1,11 +1,41 @@
-use objc2::__framework_prelude::Retained;
-use objc2::rc::autoreleasepool;
+use objc2::rc::{Retained, autoreleasepool};
+use objc2::msg_send;
+use objc2::runtime::AnyClass;
 use objc2_foundation::{NSData, NSUTF8StringEncoding, NSString, NSUInteger};
+use objc2::__macro_helpers::MaybeOptionRetained;
 use uuid::Uuid;
 use rusqlite::{Result as SqlResult};
+use std::ffi::{c_void, CStr};
+use std::fmt::Display;
+
 use crate::db::contact::{Contact, ContactObjC};
-use std::ffi::c_void;
-use objc2::__macro_helpers::MaybeOptionRetained;
+
+/// Создаём `Id<NSData>` из байтового вектора, вызывая `[NSData dataWithBytes:length:]` напрямую.
+fn create_nsdata(bytes: &[u8]) -> Retained<NSData> {
+    unsafe {
+        let nsdata_class = AnyClass::get(CStr::from_bytes_with_nul(b"NSData\0").unwrap())
+            .expect("NSData class not found");
+        let raw: *mut NSData = msg_send![nsdata_class, dataWithBytes: bytes.as_ptr(), length: bytes.len()];
+        Retained::retain(raw).unwrap()
+    }
+}
+
+/// Создаём `Id<NSString>` из обычной строки, вызывая `[NSString initWithBytes:length:encoding:]`.
+fn create_nsstring(s: &str) -> Retained<NSString> {
+    unsafe {
+        // Получаем класс NSString через Class::get
+        let nsstring_class = AnyClass::get(CStr::from_bytes_with_nul(b"NSString\0").unwrap())
+            .expect("NSString class not found");
+        let raw: *mut NSString = msg_send![nsstring_class, alloc];
+        let raw: *mut NSString = msg_send![
+            raw,
+            initWithBytes: s.as_ptr(),
+            length: s.len(),
+            encoding: NSUTF8StringEncoding
+        ];
+        Retained::retain(raw).unwrap()
+    }
+}
 
 pub fn convert_to_nsdata(bytes: Vec<u8>) -> *mut NSData {
     let data = NSData::from_vec(bytes);
@@ -52,10 +82,20 @@ pub fn optional_to_nsstring(opt: Option<String>) -> *mut NSString {
 
 pub fn optional_nsstring(ns_str: *mut NSString) -> Option<String> {
     unsafe {
-        if ns_str.is_null() || ns_str.length() == 0 {
+        if ns_str.is_null() {
             None
         } else {
-            Some(ns_str.to_string())
+            // Сначала получаем ссылку &NSString из *mut NSString
+            let nsref = ns_str.as_ref();
+            // Проверяем длину
+            if let Some(ns) = nsref {
+                if ns.len() == 0 {
+                    return None;
+                }
+                // Конвертируем в String
+                return Some(ns.to_string());
+            }
+            None
         }
     }
 }
@@ -73,28 +113,23 @@ impl Contact {
         unsafe {
             let objc_contact = ContactObjC_new();
 
-            // Конвертация UUID
-            let uuid_bytes = self.id.as_bytes();
-            let uuid_data: *mut NSData = NSData::dataWithBytes_length(
-                uuid_bytes.as_ptr() as *const c_void,
-                uuid_bytes.len() as NSUInteger
-            )
-                .autorelease_return()
-                .into();
+            // UUID -> NSData -> *mut NSData
+            let bytes = self.id.as_bytes();
+            let data_id = create_nsdata(bytes);
+            let data_ptr = Retained::into_raw(data_id);
+            ContactObjC_setId(objc_contact, data_ptr);
 
-            ContactObjC_setId(objc_contact, uuid_data);
+            // first_name
+            let fname_id = create_nsstring(&self.first_name);
+            let fname_ptr = Retained::into_raw(fname_id);
+            ContactObjC_setFirstName(objc_contact, fname_ptr);
 
-            // Конвертация имени
-            let first_name: *mut NSString = NSString::from_str(&self.first_name)
-                .autorelease_return()
-                .into();
+            // last_name
+            let lname_id = create_nsstring(&self.last_name);
+            let lname_ptr = Retained::into_raw(lname_id);
+            ContactObjC_setLastName(objc_contact, lname_ptr);
 
-            let last_name: *mut NSString = NSString::from_str(&self.last_name)
-                .autorelease_return()
-                .into();
-
-            ContactObjC_setFirstName(objc_contact, first_name);
-            ContactObjC_setLastName(objc_contact, last_name);
+            // Остальные поля (например, relationship) устанавливайте через setter, если нужно.
 
             objc_contact
         }

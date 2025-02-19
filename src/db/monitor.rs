@@ -26,7 +26,7 @@ use std::thread;
 use std::os::raw::c_char;
 use std::ffi::{CString, CStr};
 use std::time::Duration;
-
+use base64::Engine;
 use once_cell::sync::Lazy;
 use serde::{Serialize, Deserialize};
 
@@ -67,50 +67,54 @@ static EVENT_RECEIVER: Lazy<Mutex<Option<Receiver<PreUpdateEvent>>>> = Lazy::new
 
 /// Регистрируем preupdate‑hook для соединения rusqlite.
 /// В колбэке формируется PreUpdateEvent и отправляется в канал.
-pub fn register_preupdate_hook(conn: &Connection) {
-    conn.preupdate_hook(Some(|action, db, tbl, case| {
-        let operation = match action {
-            Action::SQLITE_INSERT => "INSERT",
-            Action::SQLITE_DELETE => "DELETE",
-            Action::SQLITE_UPDATE => "UPDATE",
-            _ => "UNKNOWN",
-        };
-        let (rowid, old_vals, new_vals) = match case {
-            PreUpdateCase::Insert(new_acc) => {
-                let rid = new_acc.get_new_row_id();
-                let vals = collect_new_values(&new_acc);
-                (rid, None, Some(vals))
-            },
-            PreUpdateCase::Delete(old_acc) => {
-                let rid = old_acc.get_old_row_id();
-                let vals = collect_old_values(&old_acc);
-                (rid, Some(vals), None)
-            },
-            PreUpdateCase::Update { old_value_accessor, new_value_accessor } => {
-                let rid = new_value_accessor.get_new_row_id();
-                let oldv = collect_old_values(&old_value_accessor);
-                let newv = collect_new_values(&new_value_accessor);
-                (rid, Some(oldv), Some(newv))
-            },
-            PreUpdateCase::Unknown => (0, None, None),
-        };
+pub async fn register_preupdate_hook(conn: &Connection) -> Result<()> {
+    conn.call(|conn| {
+        conn.preupdate_hook(Some(
+            |action: Action, db: &str, tbl: &str, case: &PreUpdateCase| {
+                // Разыменовываем case, чтобы работать с его значениями
+                let (rowid, old_vals, new_vals) = match *case {
+                    PreUpdateCase::Insert(ref new_acc) => {
+                        let rid = new_acc.get_new_row_id();
+                        let vals = collect_new_values(new_acc);
+                        (rid, None, Some(vals))
+                    },
+                    PreUpdateCase::Delete(ref old_acc) => {
+                        let rid = old_acc.get_old_row_id();
+                        let vals = collect_old_values(old_acc);
+                        (rid, Some(vals), None)
+                    },
+                    PreUpdateCase::Update { ref old_value_accessor, ref new_value_accessor } => {
+                        let rid = new_value_accessor.get_new_row_id();
+                        let oldv = collect_old_values(old_value_accessor);
+                        let newv = collect_new_values(new_value_accessor);
+                        (rid, Some(oldv), Some(newv))
+                    },
+                    PreUpdateCase::Unknown => (0, None, None),
+                };
 
-        let evt = PreUpdateEvent {
-            db_name: db.to_string(),
-            table: tbl.to_string(),
-            operation: operation.to_string(),
-            rowid,
-            old_values: old_vals,
-            new_values: new_vals,
-        };
+                let evt = PreUpdateEvent {
+                    db_name: db.to_string(),
+                    table: tbl.to_string(),
+                    operation: match action {
+                        Action::SQLITE_INSERT => "INSERT".to_string(),
+                        Action::SQLITE_DELETE => "DELETE".to_string(),
+                        Action::SQLITE_UPDATE => "UPDATE".to_string(),
+                        _ => "UNKNOWN".to_string(),
+                    },
+                    rowid,
+                    old_values: old_vals,
+                    new_values: new_vals,
+                };
 
-        // Отправляем событие в глобальный канал
-        if let Some(ref tx) = *EVENT_SENDER.lock().unwrap() {
-            if let Err(e) = tx.try_send(evt) {
-                eprintln!("EVENT_SENDER try_send error: {:?}", e);
+                if let Some(ref tx) = *EVENT_SENDER.lock().unwrap() {
+                    if let Err(e) = tx.try_send(evt) {
+                        eprintln!("EVENT_SENDER try_send error: {:?}", e);
+                    }
+                }
             }
-        }
-    }));
+        ));
+        Ok(())
+    }).await
 }
 
 /// Сбор значений для старой строки.
@@ -148,7 +152,7 @@ fn value_to_string(v: tokio_rusqlite::types::ValueRef) -> String {
         tokio_rusqlite::types::ValueRef::Integer(i) => i.to_string(),
         tokio_rusqlite::types::ValueRef::Real(r) => r.to_string(),
         tokio_rusqlite::types::ValueRef::Text(t) => String::from_utf8_lossy(t).to_string(),
-        tokio_rusqlite::types::ValueRef::Blob(b) => base64::encode(b),
+        tokio_rusqlite::types::ValueRef::Blob(b) => base64::engine::general_purpose::STANDARD.encode(b).to_string(),
     }
 }
 

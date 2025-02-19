@@ -1,5 +1,5 @@
 use objc2_foundation::{NSData, NSString, NSNumber};
-use objc2::rc::{Id, autoreleasepool};
+use objc2::rc::{Retained, autoreleasepool};
 use tokio_rusqlite::{Connection, params, Result as SqlResult};
 use uuid::Uuid;
 use std::collections::HashMap;
@@ -32,6 +32,10 @@ pub struct MessageObjC {
     pub try_count: i64,
 }
 
+// Обеспечиваем, что MessageObjC можно отправлять между потоками.
+unsafe impl Send for MessageObjC {}
+unsafe impl Sync for MessageObjC {}
+
 pub struct MessageRepo {
     conn: Arc<Connection>,
 }
@@ -44,76 +48,79 @@ impl MessageRepo {
     // Основные CRUD-операции
     pub async fn get(&self, id: Uuid) -> SqlResult<Option<MessageObjC>> {
         let conn = self.conn.clone();
-        let mut stmt = conn.call(
-            r#"SELECT 
-                id, from_uuid, to_uuid, prev_uuid, contact_id,
-                status, audio_url, duration, text, client_text,
-                gpt_text, server_text, translated_text, language,
-                error, created_at, updated_at, try_count
-             FROM message 
-             WHERE id = ?1"#,
-        ).await?;
-
-        let id_bytes = id.as_bytes().to_vec();
-        let mut rows = stmt.query(params![id_bytes]).await?;
-
-        if let Some(row) = rows.next().await? {
-            Ok(Some(Self::row_to_objc(row)?))
-        } else {
-            Ok(None)
-        }
+        let result = conn.call(move |conn| {
+            let mut stmt = conn.prepare(
+                r#"SELECT
+                    id, from_uuid, to_uuid, prev_uuid, contact_id,
+                    status, audio_url, duration, text, client_text,
+                    gpt_text, server_text, translated_text, language,
+                    error, created_at, updated_at, try_count
+                 FROM message
+                 WHERE id = ?1"#
+            )?;
+            let id_bytes = id.as_bytes().to_vec();
+            let mut rows = stmt.query(params![id_bytes])?;
+            if let Some(row) = rows.next()? {
+                Ok(Some(Self::row_to_objc(row)?))
+            } else {
+                Ok(None)
+            }
+        }).await?;
+        Ok(result)
     }
 
     pub async fn add(&self, message: &MessageObjC) -> SqlResult<()> {
         let message = Self::objc_to_rust(message)?;
         let conn = self.conn.clone();
-        let mut stmt = conn.call(
-            r#"INSERT INTO message (
-                id, from_uuid, to_uuid, prev_uuid, contact_id,
-                status, audio_url, duration, text, client_text,
-                gpt_text, server_text, translated_text, language,
-                error, created_at, updated_at, try_count
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)"#,
-        ).await?;
-
-        stmt.execute(params![
-            message.id.as_bytes().to_vec(),
-            message.from.as_bytes().to_vec(),
-            message.to.as_bytes().to_vec(),
-            message.prev.map(|u| u.as_bytes().to_vec()),
-            message.contact_id.as_bytes().to_vec(),
-            message.status,
-            message.audio_url,
-            message.duration,
-            message.text,
-            message.client_text,
-            message.gpt_text,
-            message.server_text,
-            serde_json::to_vec(&message.translated_text)?,
-            message.language,
-            message.error,
-            message.created_at,
-            message.updated_at,
-            message.try_count
-        ]).await?;
-
+        conn.call(move |conn| {
+            let mut stmt = conn.prepare(
+                r#"INSERT INTO message (
+                    id, from_uuid, to_uuid, prev_uuid, contact_id,
+                    status, audio_url, duration, text, client_text,
+                    gpt_text, server_text, translated_text, language,
+                    error, created_at, updated_at, try_count
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)"#
+            )?;
+            stmt.execute(params![
+                message.id.as_bytes().to_vec(),
+                message.from.as_bytes().to_vec(),
+                message.to.as_bytes().to_vec(),
+                message.prev.map(|u| u.as_bytes().to_vec()),
+                message.contact_id.as_bytes().to_vec(),
+                message.status,
+                message.audio_url,
+                message.duration,
+                message.text,
+                message.client_text,
+                message.gpt_text,
+                message.server_text,
+                serde_json::to_vec(&message.translated_text)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Blob, Box::new(e)))?,
+                message.language,
+                message.error,
+                message.created_at,
+                message.updated_at,
+                message.try_count
+            ])?;
+            Ok(())
+        }).await?;
         Ok(())
     }
 
     // Специфические методы
     pub async fn get_by_status(&self, status: i64) -> SqlResult<Vec<MessageObjC>> {
         let conn = self.conn.clone();
-        let mut stmt = conn.call(
-            "SELECT * FROM message WHERE status = ?1 ORDER BY created_at DESC"
-        ).await?;
-
-        let mut rows = stmt.query(params![status]).await?;
-        let mut messages = Vec::new();
-
-        while let Some(row) = rows.next().await? {
-            messages.push(Self::row_to_objc(row)?);
-        }
-
+        let messages = conn.call(move |conn| {
+            let mut stmt = conn.prepare(
+                r#"SELECT * FROM message WHERE status = ?1 ORDER BY created_at DESC"#
+            )?;
+            let mut rows = stmt.query(params![status])?;
+            let mut messages = Vec::new();
+            while let Some(row) = rows.next()? {
+                messages.push(Self::row_to_objc(row)?);
+            }
+            Ok(messages)
+        }).await?;
         Ok(messages)
     }
 
@@ -132,9 +139,7 @@ impl MessageRepo {
                 client_text: optional_to_nsstring(row.get(9_usize).ok()),
                 gpt_text: optional_to_nsstring(row.get(10_usize).ok()),
                 server_text: optional_to_nsstring(row.get(11_usize).ok()),
-                translated_text: convert_to_nsdata(
-                    row.get::<_, Vec<u8>>(12_usize)? // Указываем тип данных и индекс раздельно
-                ),
+                translated_text: convert_to_nsdata(row.get::<_, Vec<u8>>(12_usize)?),
                 language: optional_to_nsstring(row.get(13_usize).ok()),
                 error: optional_to_nsstring(row.get(14_usize).ok()),
                 created_at: row.get(15_usize)?,
@@ -159,9 +164,8 @@ impl MessageRepo {
                 client_text: optional_nsstring(message.client_text),
                 gpt_text: optional_nsstring(message.gpt_text),
                 server_text: optional_nsstring(message.server_text),
-                translated_text: serde_json::from_slice(
-                    &nsdata_to_bytes(message.translated_text)? // Альтернативный вариант с ссылкой
-                )?,
+                translated_text: serde_json::from_slice(&nsdata_to_bytes(message.translated_text)?)
+                    .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Blob, Box::new(e)))?,
                 language: optional_nsstring(message.language),
                 error: optional_nsstring(message.error),
                 created_at: message.created_at,
@@ -181,7 +185,7 @@ fn nsdata_to_bytes(nsdata: *mut NSData) -> SqlResult<Vec<u8>> {
         return Ok(Vec::new());
     }
 
-    let data = unsafe { Id::retain(nsdata) }
+    let data = unsafe { Retained::retain(nsdata) }
         .ok_or_else(|| rusqlite::Error::InvalidParameterName("Null NSData".into()))?;
 
     unsafe {

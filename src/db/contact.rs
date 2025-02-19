@@ -13,6 +13,12 @@ use super::objc_converters::{
 };
 use crate::db::cache::CacheHandler;
 
+#[repr(transparent)]
+pub struct ContactObjCPtr(pub *mut ContactObjC);
+
+unsafe impl Send for ContactObjCPtr {}
+unsafe impl Sync for ContactObjCPtr {}
+
 #[repr(C)]
 pub struct ContactObjC {
     pub id: *mut NSData,
@@ -28,6 +34,9 @@ pub struct ContactObjC {
     pub is_pro: bool,
 }
 
+unsafe impl Send for ContactObjC {}
+unsafe impl Sync for ContactObjC {}
+
 pub struct ContactRepo {
     conn: Arc<Connection>,
     cache: CacheHandler,
@@ -40,70 +49,72 @@ impl ContactRepo {
 
     /// Возвращает страницу контактов, отсортированную по времени создания.
     pub async fn get_paginated(&self, offset: i64, limit: i64) -> SqlResult<Vec<ContactObjC>> {
-        let mut stmt = self.conn.call(
-            r#"SELECT
+        let conn = self.conn.clone();
+        let contacts = conn.call(move |mut conn| {
+            let mut stmt = conn.prepare(
+                r#"SELECT
                 id, first_name, last_name, relationship,
                 username, language, picture_url,
                 last_message_at, created_at, updated_at, is_pro
              FROM contact
              ORDER BY created_at
-             LIMIT ?1 OFFSET ?2"#
-        ).await?;
+             LIMIT ?1 OFFSET ?2"#)?;
 
-        let mut rows = stmt.query(params![limit, offset]).await?;
-        let mut contacts = Vec::new();
+            let mut rows = stmt.query(params![limit, offset])?;
+            let mut contacts = Vec::new();
 
-        while let Some(row) = rows.next().await? {
-            contacts.push(Self::row_to_objc(row)?);
-        }
+            while let Some(row) = rows.next()? {
+                contacts.push(Self::row_to_objc(row)?);
+            }
+
+            Ok(contacts)
+        }).await?;
 
         Ok(contacts)
     }
 
     /// Получаем контакт по UUID, сначала пытаемся найти в кэше
-    pub async fn get(&self, id: Uuid) -> rusqlite::Result<Option<*mut super::contact::ContactObjC>> {
-        // Сначала проверяем кэш
+    pub async fn get(&self, id: Uuid) -> tokio_rusqlite::Result<Option<ContactObjCPtr>> {
         if let Some(contact) = self.cache.get_contact(&id) {
-            // Если найден, можно преобразовать в ObjC-формат (через to_objc)
-            return Ok(Some(contact.to_objc()));
+            return Ok(Some(ContactObjCPtr(contact.to_objc())));
         }
-
-        // Если в кэше нет, выполняем запрос в базу
-        let mut stmt = self.conn.call(
-            r#"SELECT
+        let conn = self.conn.clone();
+        let id_copy = id;
+        let result = conn.call(move |conn| {
+            let mut stmt = conn.prepare(
+                r#"SELECT
                 id, first_name, last_name, relationship,
                 username, language, picture_url,
                 last_message_at, created_at, updated_at, is_pro
              FROM contact
-             WHERE id = ?1"#,
-        ).await?;
-
-        let id_bytes = id.as_bytes().to_vec();
-        let mut rows = stmt.query(rusqlite::params![id_bytes]).await?;
-
-        if let Some(row) = rows.next().await? {
-            let contact_rust = Self::row_to_rust(row)?;
-            // Обновляем кэш
-            self.cache.put_contact(id, contact_rust.clone());
-            // Преобразуем в ObjC-формат и возвращаем
-            Ok(Some(contact_rust.to_objc()))
-        } else {
-            Ok(None)
-        }
+             WHERE id = ?1"#
+            )?;
+            let id_bytes = id_copy.as_bytes().to_vec();
+            let mut rows = stmt.query(rusqlite::params![id_bytes])?;
+            if let Some(row) = rows.next()? {
+                let contact_rust = Self::row_to_rust(row)?;
+                Ok(Some(ContactObjCPtr(contact_rust.to_objc())))
+            } else {
+                Ok(None)
+            }
+        }).await?;
+        Ok(result)
     }
 
     pub async fn add(&self, contact: &ContactObjC) -> SqlResult<()> {
         let contact = Self::objc_to_rust(contact)?;
-        let mut stmt = self.conn.call(
-            r#"INSERT INTO contact (
+        let conn = self.conn.clone();
+
+        conn.call(move |mut conn| {
+            let mut stmt = conn.prepare(
+                r#"INSERT INTO contact (
                 id, first_name, last_name, relationship,
                 username, language, picture_url,
                 last_message_at, created_at, updated_at, is_pro
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"#,
-        ).await?;
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"#)?;
 
-        stmt.execute(params![
-            contact.id.as_bytes().to_vec(),
+            stmt.execute(params![
+            contact.id.as_bytes(),
             contact.first_name,
             contact.last_name,
             contact.relationship,
@@ -114,7 +125,10 @@ impl ContactRepo {
             contact.created_at,
             contact.updated_at,
             contact.is_pro as i64
-        ]).await?;
+        ])?;
+
+            Ok(())
+        }).await?;
 
         Ok(())
     }
@@ -122,16 +136,22 @@ impl ContactRepo {
     // Специфические методы
     pub async fn search_by_name(&self, query: &str) -> SqlResult<Vec<ContactObjC>> {
         let query = format!("%{}%", sanitize_like(query));
-        let mut stmt = self.conn.call(
-            "SELECT * FROM contact WHERE first_name LIKE ?1 OR last_name LIKE ?1"
-        ).await?;
+        let conn = self.conn.clone();
 
-        let mut rows = stmt.query(params![query]).await?;
-        let mut contacts = Vec::new();
+        let contacts = conn.call(move |mut conn| {
+            let mut stmt = conn.prepare(
+                "SELECT * FROM contact WHERE first_name LIKE ?1 OR last_name LIKE ?1"
+            )?;
 
-        while let Some(row) = rows.next().await? {
-            contacts.push(Self::row_to_objc(row)?);
-        }
+            let mut rows = stmt.query(params![query])?;
+            let mut contacts = Vec::new();
+
+            while let Some(row) = rows.next()? {
+                contacts.push(Self::row_to_objc(row)?);
+            }
+
+            Ok(contacts)
+        }).await?;
 
         Ok(contacts)
     }

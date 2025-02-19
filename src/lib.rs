@@ -23,16 +23,11 @@ use crate::db::contact_status::ContactStatusRepo;
 use crate::db::message::MessageRepo;
 
 // ---------------------- Глобальные объекты ----------------------
-
 /// Глобальное хранилище асинхронного соединения
-/// (Мы храним Option<Arc<Connection>>, чтобы быть гибкими)
 static GLOBAL_CONN: Lazy<Mutex<Option<Arc<Connection>>>> =
     Lazy::new(|| Mutex::new(None));
-
-/// Глобальный кэш для контактов. Здесь создаём CacheHandler с ёмкостью 100.
-static GLOBAL_CONTACT_CACHE: Lazy<CacheHandler> =
-    Lazy::new(|| CacheHandler::new(100));
-
+/// Глобальный кэш для контактов
+static GLOBAL_CONTACT_CACHE: Lazy<CacheHandler> = Lazy::new(|| CacheHandler::new(100));
 /// Swift callback (указатель на функцию) — global
 static mut SWIFT_CALLBACK: Option<extern "C" fn(*const c_char)> = None;
 
@@ -60,7 +55,7 @@ pub extern "C" fn swift_main(
     db_key: *const c_char,
     callback: extern "C" fn(*const c_char)
 ) -> i32 {
-    // Инициализируем логгер (например, через env_logger)
+    // Инициализируем логгер (например, env_logger)
     env_logger::init();
 
     // Инициализируем базу
@@ -69,10 +64,10 @@ pub extern "C" fn swift_main(
         return init_code;
     }
 
-    // Регистрируем Swift callback
+    // Регистрируем callback
     set_swift_callback(callback);
 
-    // Запускаем фоновые службы (например, для мониторинга)
+    // Запускаем фоновые службы
     start_background_services();
 
     0
@@ -84,6 +79,7 @@ fn start_background_services() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             if let Some(conn) = &*GLOBAL_CONN.lock().unwrap() {
+                // Здесь можно запустить мониторинг изменений, если необходимо.
                 // let monitor = DataMonitor::new(conn.clone());
                 // monitor.start().await;
             }
@@ -95,22 +91,22 @@ fn start_background_services() {
 pub extern "C" fn get_contacts_page(offset: i32, limit: i32) -> *mut c_char {
     let conn_guard = GLOBAL_CONN.lock().unwrap();
     if let Some(conn) = &*conn_guard {
-        // Создаем репозиторий, передавая глобальное соединение и кэш.
+        // Создаем репозиторий с глобальным подключением и кэшем.
         let repo = ContactRepo::new(Arc::clone(conn), GLOBAL_CONTACT_CACHE.clone());
-        // Создаем временный runtime для блокирующего вызова async метода
         let rt = tokio::runtime::Runtime::new().unwrap();
         let fut = async {
-            match repo.get_paginated(offset as i64, limit as i64).await {
-                Ok(contact_objc_vec) => {
-                    // Преобразуем Vec<ContactObjC> в Vec<Contact> через функцию objc_to_rust.
+            // Оборачиваем подготовку запроса в замыкание через call.
+            let contacts_objc = repo.get_paginated(offset as i64, limit as i64).await;
+            match contacts_objc {
+                Ok(contact_objs) => {
+                    // Преобразуем каждый ContactObjC в внутреннюю структуру Contact.
                     // Если преобразование не удалось для какого-либо элемента, пропускаем его.
                     let mut contacts_rust = Vec::new();
-                    for objc in contact_objc_vec.iter() {
+                    for objc in contact_objs.iter() {
                         if let Ok(contact) = ContactRepo::objc_to_rust(objc) {
                             contacts_rust.push(contact);
                         }
                     }
-                    // Сериализуем в JSON
                     serde_json::to_string(&contacts_rust).unwrap_or_else(|_| "[]".to_string())
                 },
                 Err(e) => {
